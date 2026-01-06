@@ -1,0 +1,72 @@
+
+import os
+import re
+import requests
+from PyPDF2 import PdfReader
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
+import mimetypes
+
+# Regex for URLs
+URL_REGEX = re.compile(r'https?://[^\s<>()"\']+')
+
+def extract_urls(pdf_path):
+    """Extract all URLs from the PDF."""
+    urls = set()
+    reader = PdfReader(pdf_path)
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        urls.update(URL_REGEX.findall(text))
+        # Check link annotations
+        annots = page.get("/Annots")
+        if annots:
+            for annot in annots:
+                obj = annot.get_object()
+                if obj.get("/Subtype") == "/Link":
+                    uri = obj.get("/A", {}).get("/URI")
+                    if uri:
+                        urls.add(uri)
+    return list(urls)
+
+def safe_filename(url, content_type=None):
+    """Generate a safe filename from URL or content type."""
+    name = os.path.basename(urlparse(url).path) or "file"
+    name = re.sub(r'[<>:"/\\|?*]', "_", name)
+    if not os.path.splitext(name)[1] and content_type:
+        ext = mimetypes.guess_extension(content_type.split(";")[0])
+        if ext:
+            name += ext
+    return name
+
+def download_file(url, output_dir):
+    """Download a single file."""
+    try:
+        resp = requests.get(url, stream=True, timeout=30)
+        resp.raise_for_status()
+        fname = safe_filename(url, resp.headers.get("Content-Type"))
+        path = os.path.join(output_dir, fname)
+        base, ext = os.path.splitext(path)
+        counter = 1
+        while os.path.exists(path):
+            path = f"{base}_{counter}{ext}"
+            counter += 1
+        with open(path, "wb") as f:
+            for chunk in resp.iter_content(1024 * 256):
+                f.write(chunk)
+        print(f"Downloaded: {url} -> {path}")
+    except Exception as e:
+        print(f"Failed: {url} ({e})")
+
+def main(pdf_path, output_dir, max_workers=10):
+    os.makedirs(output_dir, exist_ok=True)
+    urls = extract_urls(pdf_path)
+    print(f"Found {len(urls)} URLs. Downloading...")
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor.map(lambda u: download_file(u, output_dir), urls)
+
+if __name__ == "__main__":
+    # Example usage:
+    # python script.py "links.pdf" "downloads"
+    pdf_path = "links.pdf"
+    output_dir = "downloads"
+    main(pdf_path, output_dir)
